@@ -1,0 +1,1904 @@
+---
+title: "COVID_nasal_swabs"
+author: "Chris Katanski"
+date: "4/08/2021"
+output: html_document
+---
+
+#Set up
+```{r, set up packages etc., echo=FALSE, results="hide", warning=FALSE, message=FALSE}
+
+#Improt packages for plotting and data manipulation.
+library(ggplot2)
+library(scales)
+library(reshape2)
+library(tidyr)
+library(dplyr) #its important that this is after tidyr I think
+
+library(grid)
+library(gridExtra)
+library(ggpubr)
+library(ggrepel)
+library(ggh4x) #For nested faceting
+
+
+#Reading in svg files into r for ggplotting
+#library(grImport2)
+#library(grConvert)
+#Reading and plotting jpeg and PNG
+#library(jpeg)
+#library(png)
+
+#library(ggrepel)
+library(stringr)
+#library(forcats)
+#library(readxl)
+
+#For nice log labels
+#library(cat.extras)
+#library(plotly)
+
+#library(extrafont)
+#font_import()
+#loadfonts()
+
+#Set the global figure theme now
+theme_set(
+  theme_bw() + theme(legend.position = "bottom", 
+        text = element_text(family = "Arial", size = 14),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(color = "black"))
+  )
+
+#Define a function that excludes things
+`%nin%` = Negate(`%in%`)
+
+empty_graph <- ggplot() + theme_void()
+```
+
+
+```{r}
+#CHANGE THIS TO MATCH YOUR COMPUTER
+setwd("~/4SR/data/20210421_preQ1/source/")
+
+```
+
+
+#_
+#Read in basewise
+```{r}
+#Noah, you might have to change this folder name
+PATH = "../5_tsv/hg19CCA+mito_adjusted_names+5Setc_020321/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)%>%
+  filter(!grepl("unass", file_name),
+         !grepl("bc11", file_name),
+         !grepl("bc12", file_name))
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-14S-CW1"="minus",
+                        "TP-CK-14S-CW2"="plus") #Recode lets you easily change a bunch of values all at once
+FILES$sample <- recode(FILES$sample, 
+                       # "bc1"="rep1_Q0",
+                       # "bc2"="rep1_preQ1",
+                       # "bc3"="rep1_preQ1+Q10nM",
+                       # "bc4"="rep1_preQ1+Q1nM",
+                       # "bc5"="rep1_Q100",
+                       # "bc6"="rep2_Q0",
+                       # "bc7"="rep2_preQ1",
+                       # "bc8"="rep2_preQ1+Q10nM",
+                       # "bc9"="rep2_preQ1+Q1nM",
+                       # "bc10"="rep2_Q100"
+                       "bc1"="rep1_Q0",
+                       "bc2"="rep2_Q0",
+                       "bc3"="rep1_preQ1",
+                       "bc4"="rep2_preQ1",
+                       "bc5"="rep1_preQ1+Q10nM",
+                       "bc6"="rep2_preQ1+Q10nM",
+                       "bc7"="rep1_preQ1+Q1nM",
+                       "bc8"="rep2_preQ1+Q1nM",
+                       "bc9"="rep1_Q100",
+                       "bc10"="rep2_Q100"
+                       ) #I got this info from the google doc
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("rep", "treatment")) 
+
+
+#Chance the "library" column to DM
+FILES <- FILES %>%
+  mutate(DM = library) %>%
+  select(-library)
+
+
+#=======================+
+#Some fun fragment stuff. 
+#The minus 3 bin is ALL READS. By contrast the minus 2 bin is all sense reads, whiles minus 1 is all antisense reads. 
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           rep = row$rep,
+           treatment = row$treatment,
+           sample = row$sample,
+           DM = row$DM)
+  #specify data types since enpty dataframes get confused and sad
+  output$gene <- as.character(output$gene)
+  output$base <- as.character(output$base)
+  output$DM <- as.character(output$DM)
+  return(output)
+}
+
+
+
+#Up to this point the "FILES" data frame is just identifying info, no actual tRNA data.
+#The last step here is to run the funciton above such that it reads in the data in file with 
+#"file_name" and identifies all of that data with the right patient, tissue, DM, bin_start, etc data
+
+#A loop to read in all the data files and add the annotation
+data_preQ1_base <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup()
+
+#These are control sequences in the reference genome left over from ancient times.
+#Best to remove them
+data_preQ1_base <- data_preQ1_base %>%
+  filter(gene %nin% c("Ecoli_Lys","Ecoli_Tyr","Yeast_Phe",
+                      "spikein_SCC1", "spikein_SCCA1",
+                      "spikein_SCCA2", "spikein_SCCA3"))
+
+```
+
+#####Extra processing
+```{r}
+#Remove select snoRNAs, rRNAs, and control RNAs from subsequent analysis
+temp <- data_preQ1_base %>%
+  filter(gene %nin% c("NR_004394.1",
+                      "NR_002716.3",
+                      "NR_003925.1",
+                      "NR_004430.2",
+                      "NR_002756.2",
+                      "NR_004391.1",
+                      "NR_004392.1",
+                      "NR_004393.1",
+                      "NR_001571.2",
+                      "Homo_sapiens_chrX.rRNA-5SR5SR",
+                      "Homo_sapiens_chrX.rRNA-58S58S",
+                      "Ecoli_Tyr",
+                      "Yeast_Phe",
+                      "Ecoli_Lys",
+                      "spikein_SCC1",
+                      "spikein_SCCA1"))
+
+#fix mitochondrial names
+#Then rearrange all names
+temp <- temp %>%
+  mutate(source="cytosolic")
+temp <- temp %>%
+  filter(grepl("mt", gene)) %>%
+  mutate(gene = paste0("Homo_sapiens_chrMT.trna1-", gene)) %>%
+  mutate(source="mitochondrial") %>%
+  rbind(filter(temp, !grepl("mt",gene))) #%>%
+  # select(-file_name)
+
+#Simplify names
+temp$info <- str_replace_all(temp$gene, "Homo_sapiens_","")
+
+
+temp <- temp%>%
+  separate(info, sep="-", c("chr","AA")) %>%
+  separate(AA, sep= -3, c("AA", "anticodon")) 
+
+#Rename Met genes as elongator or initiator based on 5' A/C or G respectively
+temp_iMet <- temp %>%
+  filter(AA =="Met" ,
+         bin_start=="-3") %>%
+  #filter(position==1) %>%
+  mutate(gene_symbol2 = ifelse(gene %in% c("Homo_sapiens_chr6.trna61-MetCAT",
+                                           "Homo_sapiens_chr1.trna32-MetCAT",
+                                           "Homo_sapiens_chr9.trna1-MetCAT"), 
+                               paste0(AA, "i"), paste0(AA,"e")) ) %>%
+  #https://www.ncbi.nlm.nih.gov/pmc/articles/PMC108860/#:~:text=A%20special%20methionine%20tRNA%20is,linkages%20(33%2C%2048).
+  group_by(gene) %>%
+  summarise(gene_symbol2 = gene_symbol2[1] )
+
+#Resume fMet filtering
+temp <- temp %>%
+  full_join(., temp_iMet, by=c("gene")) %>%
+  mutate(AA = ifelse(is.na(gene_symbol2), AA, gene_symbol2) ) %>%
+  select(-gene_symbol2) 
+
+temp <- temp %>%
+  filter(AA %nin% c("Undet", "Sup"))
+
+
+preQ1_base <- temp %>%
+  filter(!grepl("AsnATT", gene),
+         !grepl("SerACC", gene),
+         !grepl("CysACA", gene),
+         !grepl("TyrATA", gene),
+         !(anticodon=="GAT" & AA=="Ile" & source=="cytosolic"),
+         !grepl("SeCTCA", gene),
+         !grepl("SerACT", gene))
+
+```
+
+
+#Read in counts
+```{r}
+PATH = "../6_sam_counter/hg19CCA+mito_adjusted_names+5Setc_020321/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)%>%
+  filter(!grepl("unass", file_name),
+         !grepl("bc11", file_name),
+         !grepl("bc12", file_name),
+         !grepl("kall", file_name))
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-14S-CW1"="minus",
+                        "TP-CK-14S-CW2"="plus") #Recode lets you easily change a bunch of values all at once
+FILES$sample <- recode(FILES$sample, 
+                       # "bc1"="rep1_Q0",
+                       # "bc2"="rep1_preQ1",
+                       # "bc3"="rep1_preQ1+Q10nM",
+                       # "bc4"="rep1_preQ1+Q1nM",
+                       # "bc5"="rep1_Q100",
+                       # "bc6"="rep2_Q0",
+                       # "bc7"="rep2_preQ1",
+                       # "bc8"="rep2_preQ1+Q10nM",
+                       # "bc9"="rep2_preQ1+Q1nM",
+                       # "bc10"="rep2_Q100"
+                       "bc1"="rep1_Q0",
+                       "bc2"="rep2_Q0",
+                       "bc3"="rep1_preQ1",
+                       "bc4"="rep2_preQ1",
+                       "bc5"="rep1_preQ1+Q10nM",
+                       "bc6"="rep2_preQ1+Q10nM",
+                       "bc7"="rep1_preQ1+Q1nM",
+                       "bc8"="rep2_preQ1+Q1nM",
+                       "bc9"="rep1_Q100",
+                       "bc10"="rep2_Q100"
+                       ) #I got this info from the google doc
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("rep", "treatment")) 
+
+
+#Chance the "library" column to DM
+FILES <- FILES %>%
+  mutate(DM = library) %>%
+  select(-library)
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           rep = row$rep,
+           treatment = row$treatment,
+           sample = row$sample,
+           DM = row$DM)
+  #specify data types since enpty dataframes get confused and sad
+  #output$gene <- as.character(output$gene)
+  #output$base <- as.character(output$base)
+  output$name <- as.character(output$name)
+  output$DM <- as.character(output$DM)
+  return(output)
+}
+
+#A loop to read in all the data files and add the annotation
+data_preQ1_count <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup() %>%
+  mutate(gene = name) %>%
+  select(-name)
+
+data_preQ1_count <- data_preQ1_count %>%
+  filter(gene %nin% c("Ecoli_Lys","Ecoli_Tyr","Yeast_Phe",
+                      "spikein_SCC1", "spikein_SCCA1",
+                      "spikein_SCCA2", "spikein_SCCA3"))
+
+```
+
+
+#####Extra processing
+```{r}
+temp <- data_preQ1_count %>%
+  filter(gene %nin% c("NR_004394.1",
+                      "NR_002716.3",
+                      "NR_003925.1",
+                      "NR_004430.2",
+                      "NR_002756.2",
+                      "NR_004391.1",
+                      "NR_004392.1",
+                      "NR_004393.1",
+                      "NR_001571.2",
+                      "Homo_sapiens_chrX.rRNA-5SR5SR",
+                      "Homo_sapiens_chrX.rRNA-58S58S",
+                      "Ecoli_Tyr",
+                      "Yeast_Phe",
+                      "Ecoli_Lys",
+                      "spikein_SCC1",
+                      "spikein_SCCA1"))
+
+#fix mitochondrial names
+#Then rearrange all names
+temp <- temp %>%
+  mutate(source="cytosolic")
+
+temp <- temp %>%
+  filter(grepl("mt", gene)) %>%
+  mutate(gene = paste0("Homo_sapiens_chrMT.trna1-", gene)) %>%
+  mutate(source="mitochondrial") %>%
+  rbind(filter(temp, !grepl("mt",gene))) %>%
+  select(-file_name)
+
+#Simplify names
+temp$info <- str_replace_all(temp$gene, "Homo_sapiens_","")
+
+temp <- temp%>%
+  separate(info, sep="-", c("chr","AA")) %>%
+  separate(AA, sep= -3, c("AA", "anticodon")) 
+
+#Resume fMet filtering
+temp <- temp %>%
+  full_join(., temp_iMet, by=c("gene")) %>%
+  mutate(AA = ifelse(is.na(gene_symbol2), AA, gene_symbol2) ) %>%
+  select(-gene_symbol2) 
+
+temp <- temp %>%
+  filter(AA %nin% c("Undet", "Sup")) 
+
+
+preQ1_count <- temp %>%
+  filter(!grepl("AsnATT", gene),
+         !grepl("SerACC", gene),
+         !grepl("CysACA", gene),
+         !grepl("TyrATA", gene),
+         !(anticodon=="GAT" & AA=="Ile" & source=="cytosolic"),
+         !grepl("SeCTCA", gene),
+         !grepl("SerACT", gene))
+
+```
+
+#_
+#===================
+#_
+#Abundance
+##by anticodon
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start =="-2") %>%
+  select(-bin_stop,
+         -sample) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count) ) %>%
+  group_by(rep, treatment, DM, anticodon, AA, source) %>%
+  summarise(sum_rpm = sum(rpm))
+
+#Normalize to Q0
+temp <- temp %>%
+  filter(treatment=="Q0") %>%
+  group_by(DM, anticodon, AA, source) %>%
+  mutate(mean_sum_rpm = mean(sum_rpm)) %>%
+  mutate(Q0_sum_rpm = mean_sum_rpm) %>%
+  ungroup() %>%
+  select(DM, anticodon, AA, source, Q0_sum_rpm) %>%
+  full_join(temp,. , by=c("DM","anticodon","AA","source"))
+
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+plot1 <- ggplot(filter(temp, 
+              DM=="plus",
+              # treatment %nin% c("preQ1+Q1nM","Q100")
+              ),
+       aes(x=interaction(treatment), y=interaction(anticodon, AA, source), fill=log10(sum_rpm / Q0_sum_rpm))) +
+  geom_tile() +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey70") +
+  theme(axis.text.x = element_text(angle=90),
+        legend.position = "right") +
+  facet_nested(.~rep) +
+  labs(fill="Abundance\nnormalized\nto 0Q (log10)") +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+        strip.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_abundance_heat_map"
+width=4
+height=7
+scale=1.5
+dpi=600
+
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+
+
+```
+
+##RPM plot for interesting ones
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start == "-2",
+         DM=="plus")
+
+temp <- preQ1_count %>%
+  select(-bin_stop,
+         -sample) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count) ) %>%
+  group_by(rep, treatment, DM, anticodon, AA, source) %>%
+  summarise(sum_rpm = sum(rpm))
+
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+
+ggplot(filter(temp,
+              AA %in% c("His", "Asp","Asn","Tyr",
+                        "mtHis","mtAsn","mtAsp","mtTyr"),
+              DM=="plus"
+              ),
+       aes(x=treatment, y=sum_rpm)) +
+  # geom_boxplot() +
+  geom_point() +
+  scale_y_log10() +
+  facet_nested(source ~ anticodon) +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5))
+
+```
+
+##Normalized rpm
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start =="60") %>%
+  select(-bin_stop,
+         -sample) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count) ) %>%
+  group_by(rep, treatment, DM, anticodon, AA, source) %>%
+  summarise(sum_rpm = sum(rpm))
+
+#Normalize to Q0
+temp <- temp %>%
+  filter(treatment=="Q0") %>%
+  group_by(DM, anticodon, AA, source) %>%
+  mutate(mean_sum_rpm = mean(sum_rpm)) %>%
+  mutate(Q0_sum_rpm = mean_sum_rpm) %>%
+  ungroup() %>%
+  select(DM, anticodon, AA, source, Q0_sum_rpm) %>%
+  full_join(temp,. , by=c("DM","anticodon","AA","source"))
+
+#Add mean for plotting bar
+temp <- temp %>% 
+  group_by(treatment, DM, AA, anticodon, source) %>%
+  mutate(mean_sum_rpm = mean(sum_rpm))
+  
+
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$AA <- str_replace_all(temp$AA, "mt", "")
+
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+plot1 <- ggplot(filter(temp,
+              AA %in% c("His", "Asp","Asn","Tyr",
+                        "mtHis","mtAsn","mtAsp","mtTyr"),
+              DM=="plus"
+              ),
+       aes(x=treatment, y=sum_rpm / Q0_sum_rpm)) +
+  # geom_boxplot() +
+  geom_point() +
+  scale_y_log10() +
+  facet_nested(source ~ AA + anticodon) +
+  ylab("Abundance normalized to '0Q'") +
+  geom_point(aes(y=mean_sum_rpm / Q0_sum_rpm), shape=95, size=5) +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+        strip.background = element_blank(),
+        axis.title.x = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_abundance_plot"
+width=4
+height=3
+scale=1.5
+dpi=600
+
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+
+```
+
+##Box plot
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start =="60") %>%
+  select(-bin_stop,
+         -sample) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count) ) %>%
+  group_by(rep, treatment, DM, anticodon, AA, source) %>%
+  summarise(sum_rpm = sum(rpm))
+
+#Normalize to Q0
+temp <- temp %>%
+  filter(treatment=="Q0") %>%
+  group_by(DM, anticodon, AA, source) %>%
+  summarise(mean_sum_rpm = mean(sum_rpm)) %>%
+  mutate(Q0_sum_rpm = mean_sum_rpm) %>%
+  ungroup() %>%
+  select(DM, anticodon, AA, source, Q0_sum_rpm) %>%
+  full_join(temp,. , by=c("DM","anticodon","AA","source"))
+
+#Add mean for plotting bar
+temp <- temp %>% 
+  group_by(treatment, DM, AA, anticodon, source) %>%
+  mutate(mean_sum_rpm = mean(sum_rpm))
+  
+
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$AA <- str_replace_all(temp$AA, "mt", "")
+
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+my_comparisons <- list( c("0Q", "100Q"))
+
+plot1 <- ggplot(filter(temp,
+              # AA %in% c("His", "Asp","Asn","Tyr","mtHis","mtAsn","mtAsp","mtTyr"),
+              DM=="plus",
+              rep=="rep1" #Not really because I'm plotting the average field
+              ),
+       aes(x=treatment, y=mean_sum_rpm / Q0_sum_rpm)) +
+  # geom_boxplot() +
+  geom_boxplot() +
+  scale_y_log10(breaks=c(0.5,1,2)) +
+  facet_nested(. ~ source) +
+  ylab("Mean abundance\nnormalized to '0Q'") +
+  stat_compare_means(ref.group="0Q", size=4,  method="t.test",label="p.signif", hide.ns=T) +
+  coord_cartesian(ylim = c(0.25, 2.5)) +
+  geom_point(data=filter(temp, DM=="plus", rep=="rep1", treatment !="0Q",
+                              AA %in% c("His", "Asp","Asn","Tyr","mtHis","mtAsn","mtAsp","mtTyr")),
+             color="red") +
+  # geom_text_repel(data=filter(temp, DM=="plus", rep=="rep1", treatment !="0Q",
+  #                             AA %in% c("His", "Asp","Asn","Tyr","mtHis","mtAsn","mtAsp","mtTyr")),
+  #                 aes(label=AA)) +
+  # geom_point(aes(y=mean_sum_rpm / Q0_sum_rpm), shape=95, size=5) +
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+        strip.background = element_blank(),
+        axis.title.x = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_all-tRNA_boxplot"
+width=3
+height=3
+scale=1.5
+dpi=600
+
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+```
+
+
+#Q check
+
+##Mutation
+```{r}
+temp <- preQ1_base 
+
+ggplot(filter(temp,
+              bin_start=="-2",
+              treatment %in% c("Q0", "preQ1", "Q100"),
+              AA=="His",
+              DM=="minus"
+              ),
+       aes(x=position, y= mutation, group=interaction(rep, treatment, DM, gene), color=treatment)) +
+  geom_line() +
+  geom_vline(xintercept = c(34)) +
+  facet_grid(rows=vars(treatment), cols=vars(gene))
+```
+
+##Deletion
+```{r}
+temp <- preQ1_base %>%
+  filter(pileup >= 20)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+#Heat maps
+ggplot(filter(temp,
+              bin_start=="-2",
+              # treatment %in% c("Q0", "preQ1", "Q100"),
+              # (anticodon=="GTG" & chr=="chr1.trna111")|(anticodon=="GTA" & chr=="chr14.trna18"),
+              AA %in% c("His"),
+              DM=="minus"
+              ),
+       aes(y=position, x=interaction(rep, treatment) , fill= deletion/pileup)) +
+  geom_tile() +
+  geom_hline(yintercept = 34.5, linetype=2, alpha=0.3) +
+  scale_y_continuous(breaks=c(9,22,34,37,58), position="right") +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey50",
+                       limits=c(0, 0.03)
+                       ) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(cols=vars(chr, anticodon, AA)) +
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle=90))
+```
+
+###Figure 
+```{r}
+temp <- preQ1_base %>%
+  filter(pileup >= 20,
+         bin_start=="-2") %>%
+  mutate(deletion_rate = deletion / pileup) %>%
+  group_by(position, chr, anticodon, AA, treatment, DM) %>%
+  summarise(deletion_rate_mean = mean(deletion_rate))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+
+# #Trace of His
+plot1 <- ggplot(filter(temp,
+              # bin_start=="-2",
+              treatment %in% c("0Q", "preQ1","preQ1 + 0.1%Q", "100Q"),
+              (anticodon=="GTG" & chr=="chr1.trna111"),
+              # |(anticodon=="GTA" & chr=="chr14.trna18"),
+              DM=="minus"
+              ),
+       aes(x=position, y=deletion_rate_mean , color= treatment, group=interaction(treatment))) +
+  geom_line() +
+  coord_cartesian(xlim = c(25, 40)) +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey50",
+                       limits=c(0, 0.03)
+                       ) +
+  ylab("Average deletion rate") +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(cols=vars(paste0(AA,anticodon))) +
+  theme(legend.position = "right",
+        strip.background = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_His_deletion"
+width=3
+height=2
+scale=1.5
+dpi=600
+
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+
+```
+
+
+#Other mutations
+##Heat maps
+```{r}
+temp <- preQ1_base %>%
+  filter(bin_start == "60",
+         pileup >= 200,
+         ) 
+
+temp <- temp %>%
+  ungroup() %>%
+  filter(treatment =="Q0") %>%
+  group_by(gene, position, DM) %>%
+  summarise(mutation_0Q = mean(mutation)) %>%
+  select(gene, DM, position, mutation_0Q) %>%
+  full_join(temp, ., by=c("gene","DM","position"))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+ggplot(filter(temp, 
+              DM=="minus",
+              # AA %in% c("Tyr","His","Asn","Asp")
+              AA =="Asn"
+              ),
+       aes(y=position, x=interaction(rep, treatment), fill= mutation - mutation_0Q)) +
+  geom_tile() +
+  geom_vline(xintercept = c(2.5,4.5,6.5,8.5)) +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey50",
+                       # limits=c(0, 0.03)
+                       ) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+  facet_nested(.~ interaction(AA, anticodon, chr))
+  
+```
+
+
+
+
+#Fragments
+##Heat maps
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start %nin% c(-1,-2,-3)) %>%
+  group_by(gene, treatment, rep, DM) %>%
+  mutate(total_gene_count = sum(count)) %>%
+  mutate(fraction_abundance = count / total_gene_count) %>%
+  filter(count >= 20)
+
+temp <- temp %>%
+  filter(treatment == "Q0") %>%
+  group_by(DM, gene, bin_start) %>%
+  summarise(fraction_abundance_0Q = mean(fraction_abundance)) %>%
+  full_join(temp,., by=c("DM","gene","bin_start"))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+ggplot(filter(temp,
+              AA %in% c("Asn"),
+              DM=="plus"),
+       aes(x=interaction(rep, bin_start), y=interaction(AA, anticodon, chr), 
+           fill= log10(fraction_abundance / fraction_abundance_0Q) )) +
+  geom_tile() +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey50",
+                       # limits=c(0, 0.03)
+                       ) +
+  facet_grid(cols=vars(treatment)) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+```
+
+##IsoACCEPTOR heat map
+```{r}
+temp <- preQ1_count %>%
+  filter(bin_start %nin% c(-1,-2,-3)) %>%
+  group_by(DM, treatment, rep, AA, anticodon, bin_start, source) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(DM, treatment, rep, AA, anticodon) %>%
+  mutate(fraction_count = sum_count / sum(sum_count)) %>%
+  filter(sum_count >= 20 ) %>%
+  group_by(DM, treatment, AA, anticodon, bin_start) %>%
+  mutate(mean_fraction_count = mean(fraction_count))
+
+
+
+temp <- temp %>%
+  filter(treatment == "Q0") %>%
+  group_by(DM, AA, anticodon, bin_start) %>%
+  summarise(fraction_count_Q0 = mean(fraction_count)) %>%
+  full_join(temp,., by=c("DM","AA", "anticodon","bin_start"))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+ggplot(filter(temp,
+              # !grepl("mt", AA),
+              treatment %nin% c("0Q"),
+              bin_start %nin% c("20"),
+              # AA %in% c("His","Tyr","Asp","Asn"),
+              DM=="plus"),
+       aes(x=interaction(bin_start), y=interaction(anticodon, AA, source), 
+           fill= log10(mean_fraction_count / fraction_count_Q0) )) +
+  geom_tile() +
+  scale_fill_gradient2(low="blue", mid="grey70", midpoint=0, high="red", na.value="grey50",
+                       limits=c(-0.6, 0.6)
+                       ) +
+  facet_grid(cols=vars(treatment)) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+```
+
+##Tyr PreQ1 figure
+```{r}
+plot1 <- ggplot(filter(temp,
+              # !grepl("mt", AA),
+              # treatment %nin% c("0Q"),
+              bin_start %in% c("30"),
+              # AA %in% c("His","Tyr","Asp","Asn"),
+              AA =="Tyr",
+              DM=="plus"),
+       aes(x=treatment, y=fraction_count )) +
+  geom_point() +
+  geom_point(aes(y=mean_fraction_count), shape=95, size=5) +
+  scale_y_log10() +
+  ggtitle("Abundance of Tyr 5'-half fragments") +
+  ylab("(tRF / tRNA)^Tyr") +
+  # facet_grid(cols=vars(AA)) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+        axis.title.x = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_Tyr_fragment"
+width=2
+height=2.5
+scale=1.5
+dpi=600
+
+# ggsave(paste0(path, figure_name,".png"),
+#        plot = figure,
+#        scale = scale,
+#        dpi = dpi,
+#        width = width,
+#        height = height)
+
+```
+
+###20220209 - full splicing fragment check
+```{r}
+temp <- preQ1_base %>%
+  filter(#AA=="Tyr", 
+         anticodon=="GTA",
+         source != "mitochondrial",
+         # chr == "chr1.trna111",
+         DM=="minus") %>%
+  group_by(anticodon, DM, treatment, rep, bin_start, position, base) %>%
+  summarise(combine_pileup = sum(pileup))
+
+ggplot(filter(temp,
+              # !grepl("mt", AA),
+              # treatment %nin% c("0Q"),
+              bin_start %in% c("30"),
+              # AA %in% c("His","Tyr","Asp","Asn"),
+              ),
+       aes(x=position, y=combine_pileup, color=treatment, group=interaction(treatment, rep) )) +
+  geom_line() +
+  geom_text(aes(label=base, y=20), color="black") +
+  facet_wrap(~bin_start) +
+  # scale_y_log10() +
+  coord_cartesian(xlim = c(25,45)) +
+  geom_vline(xintercept = c(37), alpha=0.3, linetype=2) 
+
+
+```
+
+
+##His and Tyr PreQ1 figure
+```{r}
+
+temp <- preQ1_count %>%
+  filter(bin_start %nin% c(-1,-2,-3)) %>%
+  group_by(DM, treatment, rep, AA, anticodon, bin_start, source) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(DM, treatment, rep, AA, anticodon) %>%
+  mutate(fraction_count = sum_count / sum(sum_count)) %>%
+  filter(sum_count >= 20 ) %>%
+  group_by(DM, treatment, AA, anticodon, bin_start) %>%
+  mutate(mean_fraction_count = mean(fraction_count))
+
+
+
+temp <- temp %>%
+  filter(treatment == "Q0") %>%
+  group_by(DM, AA, anticodon, bin_start) %>%
+  summarise(fraction_count_Q0 = mean(fraction_count)) %>%
+  full_join(temp,., by=c("DM","AA", "anticodon","bin_start"))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+plot1 <- ggplot(filter(temp,
+              # !grepl("mt", AA),
+              # treatment %nin% c("0Q"),
+              bin_start %in% c("30"),
+              # AA %in% c("His","Tyr","Asp","Asn"),
+              AA %in% c("His", "Tyr"),
+              DM=="plus"),
+       aes(x=treatment, y=fraction_count )) +
+  geom_point() +
+  geom_point(aes(y=mean_fraction_count), shape=95, size=5) +
+  scale_y_log10() +
+  coord_cartesian(ylim = c(0.002, 0.04)) +
+  # ggtitle("Abundance of His 5'-half fragments") +
+  ylab("(tRF / tRNA)") +
+  facet_grid(cols=vars(AA)) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+        axis.title.x = element_blank(),
+        strip.background = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_His+Tyr_fragment"
+width=3
+height=2.5
+scale=1.5
+dpi=600
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+
+```
+
+
+
+##mitochondrial fragment
+```{r}
+
+temp <- preQ1_count %>%
+  filter(bin_start %nin% c(-1,-2,-3)) %>%
+  group_by(DM, treatment, rep, AA, anticodon, bin_start, source) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(DM, treatment, rep, AA, anticodon) %>%
+  mutate(fraction_count = sum_count / sum(sum_count)) %>%
+  filter(sum_count >= 20 ) %>%
+  group_by(DM, treatment, AA, anticodon, bin_start) %>%
+  mutate(mean_fraction_count = mean(fraction_count))
+
+
+
+temp <- temp %>%
+  filter(treatment == "Q0") %>%
+  group_by(DM, AA, anticodon, bin_start) %>%
+  summarise(fraction_count_Q0 = mean(fraction_count)) %>%
+  full_join(temp,., by=c("DM","AA", "anticodon","bin_start"))
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+plot1 <- ggplot(filter(temp,
+              # !grepl("mt", AA),
+              # treatment %nin% c("0Q"),
+              bin_start %in% c("30"),
+              # AA %in% c("His","Tyr","Asp","Asn"),
+              AA %in% c("mtHis", "mtTyr"),
+              DM=="plus"),
+       aes(x=treatment, y=fraction_count )) +
+  geom_point() +
+  geom_point(aes(y=mean_fraction_count), shape=95, size=5) +
+  scale_y_log10() +
+  coord_cartesian(ylim = c(0.002, 0.04)) +
+  # ggtitle("Abundance of His 5'-half fragments") +
+  ylab("(tRF / tRNA)") +
+  facet_grid(cols=vars(AA)) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+        axis.title.x = element_blank(),
+        strip.background = element_blank())
+
+#Save the figure
+layout <- rbind(c(1))
+figure <- grid.arrange(plot1,  layout_matrix = layout)
+path="./"
+figure_name="preQ1_mito_fragment"
+width=3
+height=2.5
+scale=1.5
+dpi=600
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+
+```
+
+
+
+
+
+
+
+
+
+
+#_
+#====================
+#Read in mRNA
+```{r}
+PATH = "../6_sam_counter/human_combine/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)%>%
+  filter(!grepl("unass", file_name),
+         !grepl("bc11", file_name),
+         !grepl("bc12", file_name),
+         !grepl("kall", file_name))
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-14S-WZ1"="minus") #Recode lets you easily change a bunch of values all at once
+FILES$sample <- recode(FILES$sample, 
+                       # "bc1"="rep1_Q0",
+                       # "bc2"="rep1_preQ1",
+                       # "bc3"="rep1_preQ1+Q10nM",
+                       # "bc4"="rep1_preQ1+Q1nM",
+                       # "bc5"="rep1_Q100",
+                       # "bc6"="rep2_Q0",
+                       # "bc7"="rep2_preQ1",
+                       # "bc8"="rep2_preQ1+Q10nM",
+                       # "bc9"="rep2_preQ1+Q1nM",
+                       # "bc10"="rep2_Q100"
+                       "bc1"="rep1_Q0",
+                       "bc2"="rep2_Q0",
+                       "bc3"="rep1_preQ1",
+                       "bc4"="rep2_preQ1",
+                       "bc5"="rep1_preQ1+Q10nM",
+                       "bc6"="rep2_preQ1+Q10nM",
+                       "bc7"="rep1_preQ1+Q1nM",
+                       "bc8"="rep2_preQ1+Q1nM",
+                       "bc9"="rep1_Q100",
+                       "bc10"="rep2_Q100"
+                       ) #I got this info from the google doc
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("rep", "treatment")) 
+
+
+#Chance the "library" column to DM
+FILES <- FILES %>%
+  mutate(DM = library) %>%
+  select(-library)
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           rep = row$rep,
+           treatment = row$treatment,
+           sample = row$sample,
+           DM = row$DM)
+  #specify data types since enpty dataframes get confused and sad
+  #output$gene <- as.character(output$gene)
+  #output$base <- as.character(output$base)
+  output$name <- as.character(output$name)
+  output$DM <- as.character(output$DM)
+  return(output)
+}
+
+#A loop to read in all the data files and add the annotation
+temp <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup() %>%
+  mutate(gene = name) %>%
+  select(-name)
+
+temp2 <- read.csv("./human_combine_name_dict.txt",sep="\t")
+temp3 <- temp2 %>%
+  filter(gene_biotype=="tRNA") %>%
+  filter(grepl("mt", gene_symbol)) %>%
+  mutate(gene_biotype="mt_tRNA") 
+temp2 <- temp2 %>%
+  filter(gene_biotype=="tRNA") %>%
+  filter(!grepl("mt", gene_symbol)) %>%
+  filter(gene_symbol %nin% c("spikein_SCC1","spikein_SCCA1","spikein_SCCA2",
+                             "spikein_SCCA3","Ecoli_Lys","Ecoli_Tyr", "Yeast_Phe")) %>%
+  rbind(.,temp3) %>%
+  rbind(.,filter(temp2, gene_symbol!="tRNA"))
+
+data_preQ1_count_mRNA <- temp %>%
+  filter(bin_start == "-3") %>%
+  full_join(., temp2, by=c("gene"))
+
+```
+
+
+#Learn things about mRNA
+##Compare replicates
+```{r}
+temp <- data_preQ1_count_mRNA %>%
+  group_by(rep, treatment, DM, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+
+temp <- temp %>%
+  group_by(treatment, DM) %>%
+  select(-count) %>%
+  pivot_wider(names_from = c("rep"), values_from = c("rpm"))
+
+ggplot(filter(temp, 
+              gene_biotype=="protein_coding"
+              ),
+       aes(x=rep1, y=rep2)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(~treatment)
+
+```
+
+
+##Stacked bargraph
+```{r}
+temp <- data_preQ1_count_mRNA %>%
+  group_by(rep, treatment, DM, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+#Tao's figure edits
+temp <- temp %>%
+  filter(gene_biotype != "lncRNA")
+list_of_other_types <- c("IG_C_gene", "IG_D_gene","IG_J_gene",
+                         "IG_V_gene","misc_RNA","polymorphic_pseudogene",
+                         "ribozyme","TR_C_gene","TR_D_gene","TR_J_gene",
+                         "TR_V_gene", "scaRNA","scRNA","sRNA","Mt_rRNA",
+                         "vaultRNA", "miRNA", "snoRNA")
+temp <- temp %>%
+  filter(gene_biotype %in% list_of_other_types) %>%
+  mutate(gene_biotype="other") %>%
+  rbind(filter(temp, gene_biotype %nin% list_of_other_types))
+temp$gene_biotype <- recode(temp$gene_biotype, "mt_tRNA"="mt-tRNA",
+                            "other"="other","protein_coding"="mRNA","rRNA"="rRNA",
+                            "snRNA"="snRNA","tRNA"="tRNA")
+temp$gene_biotype <- factor(temp$gene_biotype,
+                            levels=rev(c("tRNA","rRNA","mRNA","mt-tRNA","snRNA","other")))
+
+#Make pretty label for figure
+temp <- temp %>%
+  mutate(x_label=paste0(treatment, " ", "rep"," ", rep))
+temp <- temp[order( temp$rep, temp$treatment ),]
+temp$x_label <- factor(temp$x_label, levels = unique(temp$x_label))
+
+
+
+
+ggplot(filter(temp), 
+       aes(x= x_label, y=count,fill=gene_biotype)) +
+  geom_bar(position="stack", stat="identity") +
+  # scale_y_continuous(breaks=c(1000000, 2000000,3000000,4000000,5000000)  ) +
+  scale_fill_manual(values = c("tRNA"="#99CCFF", "rRNA"="#CC99CC", "mRNA"="#FFCC33",
+                                "other"="grey", "mt-tRNA"="#99CC99", "snRNA"="#CC6666"),
+                    guide = guide_legend(reverse = TRUE)) +
+  ylab("Read count") +
+  labs(fill="Gene type") +
+  # facet_wrap(~sample) +
+  theme(legend.position = "right",
+        strip.background = element_blank(),
+        axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+        axis.title.x = element_blank())
+```
+
+##Genes regulated comapred to 0Q
+```{r}
+temp <- data_preQ1_count_mRNA %>%
+  filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, DM, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+#Average reps
+temp <- temp %>%
+  group_by(DM, treatment, gene_symbol, gene_biotype) %>%
+  summarise(mean_rpm = mean(rpm, na.rm=T),
+            sd_rpm = sd(rpm, na.rm=T) ) %>%
+  filter(!is.na(sd_rpm))
+
+temp <- temp %>%
+  filter(treatment =="0Q") %>%
+  ungroup() %>%
+  mutate(Q0_rpm = mean_rpm) %>% 
+  select(DM, gene_symbol, Q0_rpm) %>%
+  full_join(temp ,. , by=c("DM","gene_symbol"))
+
+ggplot(filter(temp,
+              gene_biotype =="protein_coding",
+              # treatment !="preQ1"
+              ),
+       aes(x=Q0_rpm, y=mean_rpm, color=treatment)) +
+  geom_point() +
+  geom_abline(slope=1, linetype=2, alpha=0.3) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_text_repel(data=filter(temp,
+              gene_biotype =="protein_coding",
+              # treatment !="preQ1",
+              Q0_rpm >= 0.000005 & mean_rpm >= 0.000005,
+              mean_rpm / Q0_rpm >=4 | mean_rpm / Q0_rpm <= 0.25),
+              aes(label=gene_symbol), color="grey20") +
+  # geom_point(data=filter(temp,
+  #             gene_biotype =="protein_coding",
+  #             treatment !="100Q",
+  #             gene_symbol=="TPH1"),
+  #            color="red")
+  facet_wrap(~treatment)
+
+
+# #mitochondrial genes
+# ggplot(filter(temp,
+#               gene_biotype =="protein_coding",
+#               # gene_symbol %in%c("MT-ND1", "MT-ND2", "MT-COX1", "MT-COX2", "MT-ATP8", "MT-ATP6", 
+#               #                   "MT-COX3", "MT-ND3", "MT-ND4", "MT-ND4L", "MT-ND5", "MT-CYTB", "MT-ND6"),
+#               grepl("HSP", gene_symbol),
+#               # treatment !="preQ1"
+#               ),
+#        aes(x=Q0_rpm, y=mean_rpm, color=treatment)) +
+#   geom_point() +
+#   geom_abline(slope=1, linetype=2, alpha=0.3) +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   geom_text_repel(aes(label=gene_symbol)) +
+#   # geom_point(data=filter(temp,
+#   #             gene_biotype =="protein_coding",
+#   #             treatment !="100Q",
+#   #             gene_symbol=="TPH1"),
+#   #            color="red") 
+#   facet_wrap(~treatment)
+  
+```
+
+```{r}
+#Specific genes
+ggplot(filter(temp,
+              gene_biotype =="protein_coding",
+              # treatment !="preQ1"
+              ),
+       aes(x=Q0_rpm, y=mean_rpm)) +
+  geom_point() +
+  geom_point(data=filter(temp, gene_symbol %in% c("QTRT1", "QTRT2")), color="red") +
+  geom_abline(slope=1, linetype=2, alpha=0.3, color="blue") +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_text_repel(data=filter(temp,
+              gene_biotype =="protein_coding",
+              # treatment !="preQ1",
+              Q0_rpm >= 0.000005 & mean_rpm >= 0.000005,
+              mean_rpm / Q0_rpm >=4 | mean_rpm / Q0_rpm <= 0.25),
+              aes(label=gene_symbol), color="grey20") +
+  # geom_point(data=filter(temp,
+  #             gene_biotype =="protein_coding",
+  #             treatment !="100Q",
+  #             gene_symbol=="TPH1"),
+  #            color="red")
+  facet_wrap(~treatment)
+
+```
+
+```{r}
+temp <- data_preQ1_count_mRNA %>%
+  filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, DM, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+#Average reps
+temp2 <- temp %>%
+  group_by(DM, treatment, gene_symbol, gene_biotype) %>%
+  summarise(mean_rpm = mean(rpm, na.rm=T),
+            sd_rpm = sd(rpm, na.rm=T) ) %>%
+  filter(!is.na(sd_rpm))
+
+temp <- temp2 %>%
+  filter(treatment =="0Q") %>%
+  ungroup() %>%
+  mutate(Q0_rpm = mean_rpm) %>% 
+  select(DM, gene_symbol, Q0_rpm) %>%
+  full_join(temp ,. , by=c("DM","gene_symbol"))
+
+ggplot(filter(temp,
+              gene_biotype =="protein_coding",
+              treatment=="preQ1 + 0.1%Q",
+              ),
+       aes(x=Q0_rpm, rpm)) +
+  geom_point() +
+  geom_abline(slope=1, linetype=2, alpha=0.3) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_text_repel(data=filter(temp,
+              gene_biotype =="protein_coding",
+              treatment=="preQ1 + 0.1%Q",
+              Q0_rpm >= 0.000005 & rpm >= 0.000005,
+              rpm / Q0_rpm >=4 | rpm / Q0_rpm <= 0.25),
+              aes(label=gene_symbol), color="grey20") +
+  facet_wrap(~rep)
+
+```
+
+###Every replicate
+```{r}
+temp <- data_preQ1_count_mRNA %>%
+  filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, DM, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, DM) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+
+temp <- temp %>%
+  filter(treatment =="Q0", rep=="rep1") %>%
+  ungroup() %>%
+  mutate(Q0_rpm = rpm) %>% 
+  select(gene_symbol, Q0_rpm) %>%
+  full_join(temp ,. , by=c("gene_symbol"))
+
+ggplot(filter(temp,
+              # gene_biotype =="protein_coding",
+              ),
+       aes(x=Q0_rpm, rpm)) +
+  geom_point() +
+  geom_abline(slope=1, linetype=2, alpha=0.3) +
+  scale_x_log10() +
+  scale_y_log10() +
+  stat_cor(method = "pearson") +
+  facet_grid(rows = vars(treatment),
+             cols = vars(rep))
+
+```
+
+
+
+
+
+#====================
+#====================
+
+#Read in polysome mRNA
+##Choo choo
+```{r}
+PATH = "../6_sam_counter/polysome/human_combine/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)%>%
+  filter(!grepl("unass", file_name),
+         !grepl("bc9", file_name),
+         !grepl("bc10", file_name),
+         !grepl("bc11", file_name),
+         !grepl("bc12", file_name),
+         !grepl("kall", file_name))
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES$library <- recode(FILES$library,
+                        "TP-CK-18S-WZ5"="input",
+                        "TP-CK-18S-WZ6"="polysome") #Recode lets you easily change a bunch of values all at once
+FILES <- FILES %>%
+  filter((library == "input" & sample %in% c("bc1","bc2","bc3","bc4")) |
+           (library == "polysome" & sample %in% c("bc5","bc6","bc7","bc8")))
+
+FILES$sample <- recode(FILES$sample, 
+                       "bc1"="rep1_Q0",
+                       "bc2"="rep2_Q0",
+                       "bc3"="rep1_preQ1",
+                       "bc4"="rep2_preQ1",
+                       "bc5"="rep1_Q0",
+                       "bc6"="rep2_Q0",
+                       "bc7"="rep1_preQ1",
+                       "bc8"="rep2_preQ1",
+                       ) #I got this info from the google doc
+
+
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=T, sep="_", c("rep", "treatment")) 
+
+
+#Chance the "library" column to fraction
+FILES <- FILES %>%
+  mutate(fraction = library) %>%
+  select(-library)
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           rep = row$rep,
+           treatment = row$treatment,
+           fraction = row$fraction)
+  #specify data types since enpty dataframes get confused and sad
+  #output$gene <- as.character(output$gene)
+  #output$base <- as.character(output$base)
+  output$name <- as.character(output$name)
+  output$fraction <- as.character(output$fraction)
+  return(output)
+}
+
+#A loop to read in all the data files and add the annotation
+temp <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup() %>%
+  mutate(gene = name) %>%
+  select(-name)
+
+temp2 <- read.csv("./human_combine_name_dict.txt",sep="\t")
+temp3 <- temp2 %>%
+  filter(gene_biotype=="tRNA") %>%
+  filter(grepl("mt", gene_symbol)) %>%
+  mutate(gene_biotype="mt_tRNA") 
+temp2 <- temp2 %>%
+  filter(gene_biotype=="tRNA") %>%
+  filter(!grepl("mt", gene_symbol)) %>%
+  filter(gene_symbol %nin% c("spikein_SCC1","spikein_SCCA1","spikein_SCCA2",
+                             "spikein_SCCA3","Ecoli_Lys","Ecoli_Tyr", "Yeast_Phe")) %>%
+  rbind(.,temp3) %>%
+  rbind(.,filter(temp2, gene_symbol!="tRNA"))
+
+data_preQ1_count_polysome <- temp %>%
+  filter(bin_start == "-3") %>%
+  full_join(., temp2, by=c("gene"))
+
+```
+
+
+#Compare replicates
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, fraction) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q")
+
+temp <- temp %>%
+  group_by(treatment, fraction) %>%
+  select(-count) %>%
+  pivot_wider(names_from = c("rep"), values_from = c("rpm"))
+
+ggplot(filter(temp, 
+              gene_biotype=="protein_coding"
+              ),
+       aes(x=rep1, y=rep2)) +
+  geom_point() +
+  geom_abline(slope=1, linetype=2, alpha=0.3) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(fraction~treatment)
+
+```
+
+##Stacked bargraph
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1","preQ1+Q1nM","preQ1+Q10nM", "Q100"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q",
+                         "preQ1"="preQ1",
+                         "preQ1+Q1nM"="preQ1 + 0.1%Q",
+                         "preQ1+Q10nM"="preQ1 + 1%Q")
+
+#Tao's figure edits
+temp <- temp %>%
+  filter(gene_biotype != "lncRNA")
+list_of_other_types <- c("IG_C_gene", "IG_D_gene","IG_J_gene",
+                         "IG_V_gene","misc_RNA","polymorphic_pseudogene",
+                         "ribozyme","TR_C_gene","TR_D_gene","TR_J_gene",
+                         "TR_V_gene", "scaRNA","scRNA","sRNA","Mt_rRNA",
+                         "vaultRNA", "miRNA", "snoRNA")
+temp <- temp %>%
+  filter(gene_biotype %in% list_of_other_types) %>%
+  mutate(gene_biotype="other") %>%
+  rbind(filter(temp, gene_biotype %nin% list_of_other_types))
+temp$gene_biotype <- recode(temp$gene_biotype, "mt_tRNA"="mt-tRNA",
+                            "other"="other","protein_coding"="mRNA","rRNA"="rRNA",
+                            "snRNA"="snRNA","tRNA"="tRNA")
+temp$gene_biotype <- factor(temp$gene_biotype,
+                            levels=rev(c("tRNA","rRNA","mRNA","mt-tRNA","snRNA","other")))
+
+#Make pretty label for figure
+temp <- temp %>%
+  mutate(x_label=paste0(treatment, " ", "rep"," ", rep))
+temp <- temp[order( temp$rep, temp$treatment ),]
+temp$x_label <- factor(temp$x_label, levels = unique(temp$x_label))
+
+
+
+
+ggplot(filter(temp), 
+       aes(x= x_label, y=count,fill=gene_biotype)) +
+  geom_bar(position="stack", stat="identity") +
+  # scale_y_continuous(breaks=c(1000000, 2000000,3000000,4000000,5000000)  ) +
+  scale_fill_manual(values = c("tRNA"="#99CCFF", "rRNA"="#CC99CC", "mRNA"="#FFCC33",
+                                "other"="grey", "mt-tRNA"="#99CC99", "snRNA"="#CC6666"),
+                    guide = guide_legend(reverse = TRUE)) +
+  ylab("Read count") +
+  labs(fill="Gene type") +
+  facet_wrap(~fraction) +
+  theme(legend.position = "right",
+        strip.background = element_blank(),
+        axis.text.x = element_text(angle=90, hjust=1, vjust=0.5),
+        axis.title.x = element_blank())
+```
+
+#Compare polysome to input
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, fraction) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q")
+
+#Average replicates
+temp <- temp %>%
+  group_by(treatment, fraction,gene_symbol, gene_biotype) %>%
+  summarise(mean_rpm = mean(rpm, na.rm = T)) %>%
+  group_by(treatment, gene_symbol, gene_biotype) %>%
+  select(treatment, fraction, gene_symbol, gene_biotype, mean_rpm) %>%
+  pivot_wider(names_from = c("fraction"), values_from = c("mean_rpm"))
+
+ggplot(filter(temp,
+              gene_biotype=="protein_coding"),
+       aes(x=input, y=polysome)) +
+  geom_point() +
+  # geom_point(data=filter(temp, grepl("SOX2", gene_symbol) ), color="red") +
+  # geom_point(data=filter(temp, gene_symbol%in% c("SOX2", "MYC", "KLF4", "POU5F1") ), color="red") +
+  geom_point(data=filter(temp, gene_symbol%in% c("QTRT1", "QTRT2") ), color="red") +
+  geom_text(data=filter(temp, gene_symbol%in% c("QTRT1", "QTRT2") ), color="red", aes(label=gene_symbol)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_abline(slope=1, linetype=2, alpha=0.3, color="lightblue") +
+  facet_wrap(~treatment)
+
+```
+
+#Change from 0Q input
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, fraction) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 0)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1"))
+temp$treatment <- recode(temp$treatment, 
+                         "Q0"="0Q",
+                         "Q100" = "100Q")
+
+#Average replicates
+temp <- temp %>%
+  group_by(treatment, fraction,gene_symbol, gene_biotype) %>%
+  summarise(mean_rpm = mean(rpm, na.rm = T))
+
+temp <- temp %>%
+  filter(treatment=="0Q")
+
+
+```
+
+#Compare polysome to polysome
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  # filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, fraction) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(gene_biotype=="protein_coding") %>%
+  filter(count > 10)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1"))
+# temp$treatment <- recode(temp$treatment, 
+#                          "Q0"="0Q",
+#                          "preQ1" = "preQ1")
+
+#Average replicates
+temp <- temp %>%
+  group_by(treatment, fraction,gene_symbol, gene_biotype) %>%
+  summarise(mean_rpm = mean(rpm, na.rm = T)) %>%
+  group_by(treatment, gene_symbol, gene_biotype) %>%
+  select(treatment, fraction, gene_symbol, gene_biotype, mean_rpm) %>%
+  pivot_wider(names_from = c("treatment"), values_from = c("mean_rpm"))
+
+ggplot(filter(temp,
+              gene_biotype=="protein_coding"),
+       aes(x=Q0, y=preQ1)) +
+  geom_point() +
+  geom_text_repel(data=filter(temp, gene_biotype=="protein_coding",
+                              (preQ1 / Q0 >= 5 & Q0 >= 0.00001)|
+                              # (preQ1 / Q0 >= 3 & preQ1 >= 0.0005)|
+                              (preQ1 / Q0 <= .2 & Q0 >= 0.0001 & preQ1 >= 0.0001)),
+                  aes(label=gene_symbol), color="grey50") +
+  scale_x_log10() +
+  scale_y_log10() +
+  # geom_point(data=filter(temp, gene_symbol%in% c("SOX2", "MYC", "KLF4", "POU5F1","TP53") ), color="red") +
+  # geom_text(data=filter(temp, gene_symbol%in% c("SOX2", "MYC", "KLF4", "POU5F1","TP53") ), 
+  #           aes(label=gene_symbol),
+  #           color="red") +
+  geom_point(data=filter(temp, gene_symbol%in% c("QTRT1","QTRT2") ), color="red") +
+  geom_text(data=filter(temp, gene_symbol%in% c("QTRT1","QTRT2") ), 
+            aes(label=gene_symbol),
+            color="red") +
+  # geom_point(data=filter(temp, grepl("HSP", gene_symbol)), color="red") +
+  geom_abline(slope=1, linetype=2, alpha=0.3, color="lightblue") +
+  facet_wrap(~fraction)
+
+```
+
+#Changes in TE
+```{r}
+temp <- data_preQ1_count_polysome %>%
+  filter(gene_biotype=="protein_coding") %>%
+  group_by(rep, treatment, fraction, gene_symbol, gene_biotype) %>%
+  summarise(count = sum(count, na.rm=T)) %>%
+  group_by(rep, treatment, fraction) %>%
+  mutate(rpm = count / sum(count)) %>%
+  filter(count > 5)
+temp$gene_biotype = as.factor(temp$gene_biotype)
+
+# temp$AA <- str_replace_all(temp$AA, "mt", "")
+temp$treatment <- factor(temp$treatment, levels = c("Q0","preQ1"))
+# temp$treatment <- recode(temp$treatment, 
+#                          "Q0"="0Q",
+#                          "preQ1" = "preQ1")
+
+#Calculate TE
+temp <- temp %>%
+  select(rep, treatment, fraction, gene_symbol, rpm) %>%
+  pivot_wider(names_from=c("fraction"), values_from=c("rpm")) %>%
+  mutate(TE = polysome/input)
+
+#Average replicates
+temp <- temp %>%
+  select(rep, treatment, gene_symbol, TE) %>%
+  pivot_wider(names_from = c("rep"), values_from=c("TE")) %>%
+  group_by(treatment, gene_symbol) %>%
+  filter(!is.na(rep1), !is.na(rep2)) %>%
+  summarise(mean_TE = mean(rep1, rep2))
+
+
+#Average replicates
+temp <- temp %>%
+  group_by(treatment, fraction,gene_symbol, gene_biotype) %>%
+  # summarise(mean_rpm = mean(rpm, na.rm = T)) %>%
+  group_by(treatment, gene_symbol, gene_biotype) %>%
+  select(treatment, fraction, gene_symbol, gene_biotype, rpm, rep) %>%
+  pivot_wider(names_from = c("fraction"), values_from = c("rpm")) %>%
+  mutate(TE = polysome / input) %>%
+  select(treatment, gene_symbol, TE, rep) %>%
+  pivot_wider(names_from = c("treatment"), values_from=c("TE"))
+
+#Pivot_wider by treatment
+temp <- temp %>%
+  pivot_wider(names_from = c("treatment"), values_from=c("mean_TE"))
+
+ggplot(filter(temp),
+       aes(x=Q0, y=preQ1)) +
+  geom_point() +
+  # geom_point(data=filter(temp, grepl("HSP", gene_symbol)), color="red") +
+  geom_point(data=filter(temp, gene_symbol%in% c("QTRT1","QTRT2") ), color="red") +
+  geom_text(data=filter(temp, gene_symbol%in% c("QTRT1","QTRT2") ), 
+            aes(label=gene_symbol),
+            color="red") +
+  geom_abline(slope=1, linetpye=2, alpha=0.3) +
+  scale_x_log10() +
+  coord_cartesian(xlim = c(.02, 20), ylim = c(.02, 20)) +
+  scale_y_log10() 
+
+```
+
+#_
+
