@@ -1,0 +1,689 @@
+---
+title: "Colon stool"
+author: "Chris Katanski"
+date: "5/29/2022"
+output: html_document
+---
+
+#Set up
+```{r, set up packages etc., echo=FALSE, results="hide", warning=FALSE, message=FALSE}
+
+#Improt packages for plotting and data manipulation.
+library(ggplot2)
+library(scales)
+library(reshape2)
+library(tidyr)
+library(dplyr) #its important that this is after tidyr I think
+
+library(grid)
+library(gridExtra)
+library(ggpubr)
+library(ggrepel)
+library(ggh4x) #For nested faceting
+
+
+#Reading in svg files into r for ggplotting
+#library(grImport2)
+#library(grConvert)
+#Reading and plotting jpeg and PNG
+#library(jpeg)
+#library(png)
+
+#library(ggrepel)
+library(stringr)
+#library(forcats)
+#library(readxl)
+
+#For nice log labels
+#library(cat.extras)
+#library(plotly)
+
+#library(extrafont)
+#font_import()
+#loadfonts()
+
+#Fill patterns
+install.packages("remotes")
+# remotes::install_github("coolbutuseless/ggpattern")
+library(Rcpp)
+library(ggpattern)
+
+
+#Set the global figure theme now
+theme_set(
+  theme_bw() + theme(legend.position = "bottom", 
+        text = element_text(family = "Arial", size = 14),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(color = "black"))
+  )
+
+#Define a function that excludes things
+`%nin%` = Negate(`%in%`)
+
+empty_graph <- ggplot() + theme_void()
+```
+
+
+```{r}
+#CHANGE THIS TO MATCH YOUR COMPUTER
+setwd("~/4SR/data/20220529_QtRNAStool/source/")
+
+```
+
+
+##5S rRNA
+###Read in counts
+```{r}
+PATH = "../6_sam_counter/rRNA_5S_combine/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES <- FILES %>%
+  mutate(DM=library)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-12S-SP3-9"="stool") #Recode lets you easily change a bunch of values all at once
+
+FILES$sample <- recode(FILES$sample,
+                        "bc9"="minusDM_minusIO4",
+                        "bc10"="minusDM_plusIO4", #label says "ab"
+                        "bc11"="plusDM_minusIO4",
+                        "bc12"="plusDM_plusIO4")
+
+
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("DM", "periodate")) %>%
+  filter(!is.na(periodate))
+
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           library = row$library,
+           DM = row$DM,
+           periodate = row$periodate
+           )
+  #specify data types since enpty dataframes get confused and sad
+  #output$gene <- as.character(output$gene)
+  #output$base <- as.character(output$base)
+  output$name <- as.character(output$name)
+  output$DM <- as.character(output$DM)
+  output$periodate <- as.character(output$periodate)
+  return(output)
+}
+
+#A loop to read in all the data files and add the annotation
+data_Qstool_5S <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup() %>%
+  mutate(gene = name) %>%
+  select(-name) 
+
+
+
+```
+
+####Extra processing
+```{r}
+dict_5S <- read.csv("../source/rRNA_5s_combine_lineage.tsv", sep="\t")
+dict_5S <- dict_5S %>%
+  separate(name, sep="_", remove=F, into=c("gene", "species")) %>%
+  separate(species, sep=" ", into=c("genus", "species"))
+
+#Remove select snoRNAs, rRNAs, and control RNAs from subsequent analysis
+temp <- data_Qstool_5S %>%
+  full_join(., dict_5S, by=c("gene")) %>%
+  filter(!is.na(file_name))
+
+Qstool_5S_count <- temp
+
+```
+
+
+#What are the most abundance bugs
+##Class
+```{r}
+temp <- Qstool_5S_count %>%
+  group_by(kingdom, phylum, class, periodate, DM) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(periodate, DM) %>%
+  mutate(rpm = sum_count / sum(sum_count))
+
+ggplot(filter(temp, sum_count >=1000,
+              !is.na(class)),
+       aes(x=class, y=rpm, color=interaction(periodate, DM))) +
+  geom_point() +
+  scale_y_log10() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+```
+
+##Order
+```{r}
+temp <- Qstool_5S_count %>%
+  group_by(kingdom, phylum, class, order, periodate, DM) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(periodate, DM) %>%
+  mutate(rpm = sum_count / sum(sum_count))
+
+ggplot(filter(temp, sum_count >=500,
+              !is.na(class)),
+       aes(x=paste0(class, "_",order), y=rpm, color=interaction(periodate, DM))) +
+  geom_point() +
+  scale_y_log10() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+```
+
+##Family
+```{r}
+temp <- Qstool_5S_count %>%
+  group_by(kingdom, phylum, class, order, family, periodate, DM) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(periodate, DM) %>%
+  mutate(rpm = sum_count / sum(sum_count))
+
+ggplot(filter(temp, rpm >= 0.001,
+              !is.na(class)),
+       aes(x=paste0(class, "_",order, "_", family), y=rpm, color=interaction(periodate, DM))) +
+  geom_point() +
+  scale_y_log10() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+```
+
+##Genus
+```{r}
+temp <- Qstool_5S_count %>%
+  group_by(kingdom, phylum, class, order, family, genus, periodate, DM) %>%
+  summarise(sum_count = sum(count)) %>%
+  group_by(periodate, DM) %>%
+  mutate(rpm = sum_count / sum(sum_count))
+
+ggplot(filter(temp, rpm >= 0.001,
+              !is.na(class)),
+       aes(x=paste0(class, "_",order, "_", family, "_", genus), y=rpm, color=interaction(periodate, DM))) +
+  geom_point() +
+  scale_y_log10() +
+  geom_hline(yintercept = c(0.01), linetype=2, alpha=0.3) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1))
+
+
+temp <- temp %>%
+  filter(rpm >= .01, 
+         periodate=="minusIO4",
+         DM=="minusDM")
+
+temp2 <- Qstool_5S_count %>%
+  filter(genus %in% temp$genus, 
+         periodate=="minusIO4",
+         DM=="minusDM")
+```
+
+
+
+
+
+
+#Read in tRNAs
+###Read in basewise
+```{r}
+#Noah, you might have to change this folder name
+PATH = "../5_tsv/COMBINE_microme_tRNA/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES <- FILES %>%
+  mutate(DM=library)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-12S-SP3-9"="stool") #Recode lets you easily change a bunch of values all at once
+
+FILES$sample <- recode(FILES$sample,
+                        "bc9"="minusDM_minusIO4",
+                        "bc10"="minusDM_plusIO4", #label says "ab"
+                        "bc11"="plusDM_minusIO4",
+                        "bc12"="plusDM_plusIO4")
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("DM", "periodate")) %>%
+  filter(!is.na(periodate))
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           DM = row$DM,
+           periodate = row$periodate,
+           library = row$library)
+  #specify data types since enpty dataframes get confused and sad
+  output$gene <- as.character(output$gene)
+  output$base <- as.character(output$base)
+  output$DM <- as.character(output$DM)
+  output$periodate <- as.character(output$periodate)
+  return(output)
+}
+
+#Up to this point the "FILES" data frame is just identifying info, no actual tRNA data.
+#The last step here is to run the funciton above such that it reads in the data in file with 
+#"file_name" and identifies all of that data with the right patient, tissue, DM, bin_start, etc data
+
+#A loop to read in all the data files and add the annotation
+data_stool_tRNA_base <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup()
+
+
+```
+
+####Extra processing
+```{r}
+#Remove select snoRNAs, rRNAs, and control RNAs from subsequent analysis
+temp <- data_stool_tRNA_base %>%
+  separate(gene, sep="_tRNA-", into=c("genus","tRNA")) %>%
+  separate(genus, sep="_", into=c("genus", "species")) %>%
+  separate(tRNA, sep="-", into=c("AA","anticodon","n1","n2") ) 
+
+stool_tRNA_base <- temp 
+```
+
+
+###Read in counts
+```{r}
+PATH = "../6_sam_counter/COMBINE_microme_tRNA/"
+FILES <-data.frame( file_name = list.files(PATH) )
+
+#Split generic file names into salient parts
+FILES <- FILES %>%
+  extract(file_name, "(.*).tsv", into="file_name2", remove=FALSE) %>% #"extract" is used for 'regular expressions'
+  separate(file_name2, remove=TRUE, sep="_", c("library","junk1","junk2","barcode", "junk3","bin_start","bin_stop","junk4") ) %>% #"Separate" splits one column into several. Here I'm splitting the file name at underscore characters and putting the data into several columns like library and barcode
+  mutate(sample = barcode) %>% #"mutate" is for making new columns or overwirting existing columns
+  select(-barcode) %>% #"select" lets you pick which columns to keep. If you use a minus sign, then its 'keep everything, but drop this one'
+  select(-junk1, -junk3, -junk4, -junk2)
+
+#PROJECT SPECIFIC DECODING
+FILES$file_name <- as.character(FILES$file_name) #"Character" type is like a string in python. The contrast is "factor" for categorical data (google it)
+FILES$bin_start <- as.character(FILES$bin_start)
+FILES$bin_stop <- as.character(FILES$bin_stop)
+FILES <- FILES %>%
+  mutate(DM=library)
+FILES$library <- recode(FILES$library, 
+                        "TP-CK-12S-SP3-9"="stool") #Recode lets you easily change a bunch of values all at once
+
+FILES$sample <- recode(FILES$sample,
+                        "bc9"="minusDM_minusIO4",
+                        "bc10"="minusDM_plusIO4", #label says "ab"
+                        "bc11"="plusDM_minusIO4",
+                        "bc12"="plusDM_plusIO4")
+
+#I don't love those sample names, so lets make them more clear
+FILES <- FILES %>%
+  separate(sample, remove=FALSE, sep="_", c("DM", "periodate")) %>%
+  filter(!is.na(periodate))
+
+#=======================+
+FILES <- FILES %>%
+  mutate(bin_start = ifelse(is.na(bin_start), -3, bin_start),
+         bin_stop = ifelse(is.na(bin_stop), -3, bin_stop))
+#========================
+
+#A function that reads in a data file and adds above annotation
+read_in_one <- function(row){
+  output <- read.csv(paste0(PATH, row$file_name), header=T, sep="\t") %>%
+    mutate(bin_start = row$bin_start,
+           bin_stop  = row$bin_stop,
+           library = row$library,
+           periodate = row$periodate,
+           DM = row$DM)
+  #specify data types since enpty dataframes get confused and sad
+  #output$gene <- as.character(output$gene)
+  #output$base <- as.character(output$base)
+  output$name <- as.character(output$name)
+  output$DM <- as.character(output$DM)
+  output$periodate <- as.character(output$periodate)
+  return(output)
+}
+
+#A loop to read in all the data files and add the annotation
+data_stool_tRNA_count <- FILES %>%
+  group_by(file_name) %>%
+  do(read_in_one(.)) %>%
+  ungroup() %>%
+  mutate(gene = name) %>%
+  select(-name) 
+
+
+```
+
+
+####Extra processing
+```{r}
+#Remove select snoRNAs, rRNAs, and control RNAs from subsequent analysis
+temp <- data_stool_tRNA_base %>%
+  separate(gene, sep="_tRNA-", into=c("genus","tRNA")) %>%
+  separate(genus, sep="_", into=c("genus", "species")) %>%
+  separate(tRNA, sep="-", into=c("AA","anticodon","n1","n2") ) 
+
+stool_tRNA_count <- temp 
+```
+
+
+#_
+#Plot for Q
+
+##His
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20)
+
+ggplot(filter(temp, 
+              # DM=="plusDM",
+              AA=="His"),
+       aes(x=position, y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  geom_text(aes(label=base, y=0), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.2)) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(rows=vars(paste0(genus, species)),
+             cols=vars(paste0(AA, DM))) +
+  theme(strip.text.y = element_text(angle=0))
+
+
+```
+
+##Asn
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20)
+
+ggplot(filter(temp, 
+              # DM=="plusDM",
+              AA=="Asn"),
+       aes(x=position, y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  geom_text(aes(label=base, y=0), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.2)) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(rows=vars(paste0(genus, species)),
+             cols=vars(paste0(AA, DM))) +
+  theme(strip.text.y = element_text(angle=0))
+
+
+```
+
+##Asp
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20)
+
+ggplot(filter(temp, 
+              # DM=="plusDM",
+              AA=="Asp"),
+       aes(x=position, y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  geom_text(aes(label=base, y=0), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.2)) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(rows=vars(paste0(genus, species)),
+             cols=vars(paste0(AA, DM))) +
+  theme(strip.text.y = element_text(angle=0))
+
+
+```
+
+##Tyr
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20)
+
+ggplot(filter(temp, 
+              # DM=="plusDM",
+              AA=="Tyr"),
+       aes(x=position, y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  geom_text(aes(label=base, y=0), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.2)) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(rows=vars(paste0(genus, species)),
+             cols=vars(paste0(AA, DM))) +
+  theme(strip.text.y = element_text(angle=0))
+
+
+```
+
+
+#Try for good figures
+##Traces
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20)
+
+#Samples are clearrly switched
+temp$periodate <- recode(temp$periodate, "plusIO4"="minusIO4*", "minusIO4"="plusIO4*")
+
+#Adjust Q numbering
+temp2 <- data.frame(AA=c("His", "Asn", "Asp", "Tyr"), Qposition = c(35,34,35, 35))
+temp <- temp %>%
+  full_join(., temp2, by=c("AA"))
+
+plot1 <- ggplot(filter(temp, 
+              DM=="minusDM",
+              genus=="Roseburia"
+              # species=="maltaromaticum"
+              # AA=="Tyr"
+              ),
+       aes(x=position - Qposition + 34,
+           y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  scale_color_manual("IO4", values= c("plusIO4*"="red", "minusIO4*"="black")) +
+  geom_text(aes(label=base, y=-0.01), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.2),
+                  xlim = c(29, 39)) +
+  scale_x_continuous(breaks=c(29,34,39)) +
+  geom_vline(xintercept = c(34), linetype=2, alpha=0.3) +
+  facet_grid(cols=vars(paste0(AA))) +
+  ylab("Deletion fraction") +
+  xlab("Position") +
+  theme(strip.text.y = element_text(angle=0),
+        strip.background = element_blank())
+
+layout <- rbind(c(1))
+myplot <- grid.arrange(plot1,  layout_matrix = layout)
+figure <- arrangeGrob(myplot)
+
+path="../source/"
+figure_name="Q-tRNAs-onebug"
+width=4
+height=2
+scale=1.5
+dpi=600
+# ggsave(paste0(path, figure_name,".svg"), 
+#        plot = figure,
+#        scale = scale,
+#        dpi = dpi,
+#        width = width, 
+#        height = height)
+
+# ggsave(paste0(path, figure_name,".png"),
+#        plot = figure,
+#        scale = scale,
+#        dpi = dpi,
+#        width = width,
+#        height = height)
+```
+
+##Dots
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20, 
+         genus %nin% c("Erysipelothrix", "Ruminococcus"))
+
+#Samples are clearrly switched
+temp$periodate <- recode(temp$periodate, "plusIO4"="minusIO4*", "minusIO4"="plusIO4*")
+
+#Adjust Q numbering
+temp2 <- data.frame(AA=c("His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr",
+                         "His", "Asn", "Asp", "Tyr"), 
+                    Qposition = c(35,35,35,35,
+                                  34,34,35,35,
+                                  34,35,35,35,
+                                  34,33,35,35,
+                                  35,35,35,35,
+                                  35,33,35,35,
+                                  35,34,35,35),
+                    species =c("dorei","dorei","dorei","dorei",
+                               "longum","longum","longum","longum",
+                               "maltaromaticum","maltaromaticum","maltaromaticum","maltaromaticum",
+                               "beijerinckii","beijerinckii","beijerinckii","beijerinckii",
+                               "prausnitzii","prausnitzii","prausnitzii","prausnitzii",
+                               "phytofermentans","phytofermentans","phytofermentans","phytofermentans",
+                               "intestinalis","intestinalis","intestinalis","intestinalis")
+                    )
+temp <- temp %>%
+  full_join(., temp2, by=c("AA", "species"))
+
+plot1 <- ggplot(filter(temp, 
+              DM=="minusDM",
+              n1=="1", n2=="1",
+              position - Qposition ==0
+              ),
+       aes(x=paste0(genus,"\n", species), y=deletion / pileup, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_point() +
+  scale_color_manual("IO4", values= c("plusIO4*"="red", "minusIO4*"="black")) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1),
+        strip.text.y = element_text(angle=0),
+        strip.background = element_blank(),
+        axis.title.x = element_blank()) +
+  ylab("Deletion fraction") +
+  facet_grid(rows=vars(AA))
+
+layout <- rbind(c(1))
+myplot <- grid.arrange(plot1,  layout_matrix = layout)
+figure <- arrangeGrob(myplot)
+
+path="../source/"
+figure_name="Q-tRNAs-allbugs"
+width=3
+height=4
+scale=1.5
+dpi=600
+# ggsave(paste0(path, figure_name,".svg"), 
+#        plot = figure,
+#        scale = scale,
+#        dpi = dpi,
+#        width = width, 
+#        height = height)
+
+ggsave(paste0(path, figure_name,".png"),
+       plot = figure,
+       scale = scale,
+       dpi = dpi,
+       width = width,
+       height = height)
+```
+
+
+#Two thiol
+```{r}
+temp <- stool_tRNA_base %>%
+  filter(#AA %in% c("His","Asp", "Asn","Tyr"),
+         bin_start=="-2",
+         pileup >= 20,
+         genus %nin% c("Erysipelothrix", "Ruminococcus"))
+
+#Samples are clearrly switched
+temp$periodate <- recode(temp$periodate, "plusIO4"="minusIO4*", "minusIO4"="plusIO4*")
+
+
+ggplot(filter(temp, 
+              DM=="minusDM",
+              # genus=="Roseburia"
+              # species=="maltaromaticum"
+              AA=="Tyr"
+              ),
+       aes(x=position ,
+           y=mutation, color=periodate, 
+           group=interaction(AA, anticodon, n1, n2, periodate, DM, genus, species))) +
+  geom_line() +
+  scale_color_manual("IO4", values= c("plusIO4*"="red", "minusIO4*"="black")) +
+  geom_text(aes(label=base, y=-0.01), color="black") +
+  coord_cartesian(ylim = c(-0.02, 0.8),
+                  xlim = c(27, 37)) +
+  scale_x_continuous(breaks=c(29,34,39)) +
+  geom_vline(xintercept = c(32), linetype=2, alpha=0.3) +
+  facet_grid(cols=vars(paste0(genus,"\n", species)),
+             rows=vars(paste0(AA,anticodon))) +
+  ylab("Deletion fraction") +
+  xlab("Position") +
+  theme(strip.text.y = element_text(angle=0),
+        strip.background = element_blank())
+
+```
+#_
+
+#++++++++++++++++++
+#_
